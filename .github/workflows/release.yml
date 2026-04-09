@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag such as v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  HOMEBREW_TAP_REPOSITORY: tattn/homebrew-xcstrings-util
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  ensure-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve tag
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          echo "RELEASE_TAG=${tag}" >> "$GITHUB_ENV"
+
+      - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" -R "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" -R "${{ github.repository }}" --title "$RELEASE_TAG" --notes ""
+
+  build-binaries:
+    needs: ensure-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select latest Xcode
+        run: |
+          latest_xcode="$(ls -d /Applications/Xcode*.app | sort -V | tail -n1)"
+          echo "DEVELOPER_DIR=${latest_xcode}/Contents/Developer" >> "$GITHUB_ENV"
+
+      - name: Resolve version and tag
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          version="${tag#v}"
+          echo "RELEASE_TAG=${tag}" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Build release archive
+        run: ./scripts/build_release_archive.sh --version "$RELEASE_VERSION"
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$RELEASE_TAG" -R "${{ github.repository }}" \
+            "dist/xcstrings-util-${RELEASE_VERSION}-macos-${{ matrix.arch }}.tar.gz" \
+            "dist/xcstrings-util-${RELEASE_VERSION}-macos-${{ matrix.arch }}.tar.gz.sha256" \
+            --clobber
+
+  update-homebrew-formula:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version and tag
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          version="${tag#v}"
+          echo "RELEASE_TAG=${tag}" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Require Homebrew tap token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "$HOMEBREW_TAP_TOKEN" ]]; then
+            echo "HOMEBREW_TAP_TOKEN secret is required to push to ${HOMEBREW_TAP_REPOSITORY}." >&2
+            exit 1
+          fi
+
+      - name: Download checksum assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          gh release download "$RELEASE_TAG" -R "${{ github.repository }}" --pattern "*.sha256" --dir dist
+
+      - name: Prepare Homebrew tap repository
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          rm -rf homebrew-tap
+          mkdir homebrew-tap
+          cd homebrew-tap
+          git init -b main
+          git remote add origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPOSITORY}.git"
+          if git ls-remote --exit-code origin main >/dev/null 2>&1; then
+            git fetch --depth=1 origin main
+            git checkout -B main origin/main
+          fi
+
+      - name: Generate Homebrew formula
+        run: |
+          arm64_url="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/xcstrings-util-${RELEASE_VERSION}-macos-arm64.tar.gz"
+          x86_64_url="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/xcstrings-util-${RELEASE_VERSION}-macos-x86_64.tar.gz"
+          arm64_sha256="$(awk '{print $1}' "dist/xcstrings-util-${RELEASE_VERSION}-macos-arm64.tar.gz.sha256")"
+          x86_64_sha256="$(awk '{print $1}' "dist/xcstrings-util-${RELEASE_VERSION}-macos-x86_64.tar.gz.sha256")"
+
+          ./scripts/generate_homebrew_formula.sh \
+            --arm64-url "$arm64_url" \
+            --arm64-sha256 "$arm64_sha256" \
+            --x86_64-url "$x86_64_url" \
+            --x86_64-sha256 "$x86_64_sha256" \
+            --homepage "https://github.com/${{ github.repository }}" \
+            --version "$RELEASE_VERSION" \
+            --output "homebrew-tap/Formula/xcstrings-util.rb"
+
+      - name: Commit updated formula to tap repository
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/xcstrings-util.rb
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Update Homebrew formula for ${RELEASE_TAG}"
+          git push origin main

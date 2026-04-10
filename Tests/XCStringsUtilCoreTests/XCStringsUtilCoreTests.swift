@@ -91,6 +91,17 @@ struct XCStringsUtilCoreTests {
     #expect(hasMissingTranslation)
   }
 
+  @Test("validate allows reordered numbered placeholders")
+  func validateAllowsReorderedNumberedPlaceholders() throws {
+    let catalog = try XCStringsCatalog(data: Data(numberedPlaceholderCatalog.utf8))
+    let result = catalog.validate(requiredLocales: ["en", "ja"], strict: true)
+    let hasPlaceholderMismatch = result.errors.contains { issue in
+      issue.code == "placeholder_mismatch" && issue.key == "trial_description"
+    }
+
+    #expect(hasPlaceholderMismatch == false)
+  }
+
   @Test("upsert adds a manual key and keeps catalog valid")
   func upsertAddsKey() throws {
     var catalog = try XCStringsCatalog(data: Data(sampleCatalog.utf8))
@@ -263,6 +274,32 @@ private let sampleCatalog = #"""
           "stringUnit" : {
             "state" : "translated",
             "value" : "Title"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}
+"""#
+
+private let numberedPlaceholderCatalog = #"""
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "trial_description" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld days free, then %1$@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@、その後%2$lld日間無料"
           }
         }
       }

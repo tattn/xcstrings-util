@@ -31,6 +31,12 @@ private struct StringUnit {
   var value: String
 }
 
+private struct PlaceholderToken: Hashable {
+  var raw: String
+  var index: Int?
+  var valueType: String
+}
+
 private enum LocalizationStatus {
   case missing
   case translated
@@ -609,7 +615,7 @@ public struct XCStringsCatalog {
           }
         }
 
-        let signature = placeholderTokens(in: unit.value)
+        let signature = placeholderSignature(in: unit.value)
         if !sourceSignatures.contains(signature) {
           errors.append(
             ValidationIssue(
@@ -654,12 +660,12 @@ public struct XCStringsCatalog {
     sourceLanguage: String
   ) -> Set<[String]> {
     if let sourceLocalization = localizations[sourceLanguage] {
-      let signatures = Set(stringUnits(in: sourceLocalization).map { placeholderTokens(in: $0.value) })
+      let signatures = Set(stringUnits(in: sourceLocalization).map { placeholderSignature(in: $0.value) })
       if !signatures.isEmpty {
         return signatures
       }
     }
-    return [placeholderTokens(in: key)]
+    return [placeholderSignature(in: key)]
   }
 
   private func stringUnits(in value: Any) -> [StringUnit] {
@@ -721,17 +727,52 @@ public struct XCStringsCatalog {
     return value
   }
 
-  private func placeholderTokens(in string: String) -> [String] {
-    let pattern = #"%(?:\d+\$)?(?:lld|ld|d|f|@)"#
+  private func placeholderSignature(in string: String) -> [String] {
+    let tokens = placeholderTokens(in: string)
+    guard !tokens.isEmpty else {
+      return []
+    }
+
+    if tokens.allSatisfy({ $0.index != nil }) {
+      return tokens
+        .sorted {
+          if $0.index != $1.index {
+            return ($0.index ?? 0) < ($1.index ?? 0)
+          }
+          if $0.valueType != $1.valueType {
+            return $0.valueType < $1.valueType
+          }
+          return $0.raw < $1.raw
+        }
+        .map { "%\($0.index!)$\($0.valueType)" }
+    }
+
+    return tokens.map(\.raw)
+  }
+
+  private func placeholderTokens(in string: String) -> [PlaceholderToken] {
+    let pattern = #"%(?:(\d+)\$)?(lld|ld|d|f|@)"#
     guard let regex = try? NSRegularExpression(pattern: pattern) else {
       return []
     }
     let range = NSRange(string.startIndex..<string.endIndex, in: string)
     return regex.matches(in: string, range: range).compactMap { match in
-      guard let substringRange = Range(match.range, in: string) else {
+      guard let fullRange = Range(match.range(at: 0), in: string),
+        let typeRange = Range(match.range(at: 2), in: string)
+      else {
         return nil
       }
-      return String(string[substringRange])
+
+      let raw = String(string[fullRange])
+      let valueType = String(string[typeRange])
+      let index: Int?
+      if let indexRange = Range(match.range(at: 1), in: string) {
+        index = Int(string[indexRange])
+      } else {
+        index = nil
+      }
+
+      return PlaceholderToken(raw: raw, index: index, valueType: valueType)
     }
   }
 

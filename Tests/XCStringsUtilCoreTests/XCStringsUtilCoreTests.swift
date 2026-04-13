@@ -227,7 +227,83 @@ struct XCStringsUtilCoreTests {
       )
     }
   }
+
+  @Test("show returns stringSet values for App Shortcuts phrases")
+  func showReturnsStringSetValues() throws {
+    let catalog = try XCStringsCatalog(data: Data(stringSetCatalog.utf8))
+    let result = try catalog.show(key: "Add a task in ${applicationName}")
+
+    #expect(result.key == "Add a task in ${applicationName}")
+    #expect(result.extractionState == "extracted_with_value")
+    #expect(result.shouldTranslate == true)
+
+    let enValues = result.localizations["en"] ?? []
+    #expect(enValues.count == 2)
+    #expect(enValues.contains(ShowLocalizationValue(state: "new", value: "Add a task in ${applicationName}")))
+    #expect(enValues.contains(ShowLocalizationValue(state: "new", value: "New task in ${applicationName}")))
+
+    let jaValues = result.localizations["ja"] ?? []
+    #expect(jaValues.count == 2)
+    #expect(jaValues.contains(ShowLocalizationValue(state: "translated", value: "${applicationName}にタスクを追加")))
+    #expect(jaValues.contains(ShowLocalizationValue(state: "translated", value: "${applicationName}で新しいタスク")))
+  }
+
+  @Test("find matches stringSet values")
+  func findMatchesStringSetValues() throws {
+    let catalog = try XCStringsCatalog(data: Data(stringSetCatalog.utf8))
+    let result = try catalog.find(
+      FindQuery(field: .string, value: "タスク", locale: "ja", match: .contains)
+    )
+
+    #expect(result.count == 1)
+    #expect(result.first?.key == "Add a task in ${applicationName}")
+  }
+
+  @Test("validate detects missing stringSet translations")
+  func validateDetectsMissingStringSetTranslations() throws {
+    let catalog = try XCStringsCatalog(data: Data(stringSetCatalog.utf8))
+    let result = catalog.validate(requiredLocales: ["en", "ja", "ko"], strict: true)
+
+    let hasMissing = result.errors.contains { issue in
+      issue.code == "missing_translation"
+        && issue.key == "Add a task in ${applicationName}"
+        && issue.locale == "ko"
+    }
+    #expect(hasMissing)
+  }
 }
+
+private let stringSetCatalog = #"""
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Add a task in ${applicationName}" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "new",
+            "values" : [
+              "Add a task in ${applicationName}",
+              "New task in ${applicationName}"
+            ]
+          }
+        },
+        "ja" : {
+          "stringSet" : {
+            "state" : "translated",
+            "values" : [
+              "${applicationName}にタスクを追加",
+              "${applicationName}で新しいタスク"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.2"
+}
+"""#
 
 private let sampleCatalog = #"""
 {

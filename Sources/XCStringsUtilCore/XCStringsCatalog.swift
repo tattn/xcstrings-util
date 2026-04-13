@@ -78,6 +78,11 @@ public struct XCStringsCatalog {
     )
   }
 
+  /// Returns locales detected from manual keys only, suitable for validation requirements.
+  public var validationLocales: [String] {
+    detectedLocales(includeAutoExtracted: false)
+  }
+
   public func find(_ query: FindQuery) throws -> [FindResultEntry] {
     guard !query.value.isEmpty else {
       throw XCStringsCatalogError.invalidInput("Find query must not be empty.")
@@ -272,18 +277,16 @@ public struct XCStringsCatalog {
           )
         }
 
-        if strict {
-          appendTranslationIssues(
-            to: &errors,
-            warnings: &warnings,
-            key: key,
-            localizations: localizations,
-            requiredLocales: requiredLocales,
-            sourceLanguage: sourceLanguage,
-            strict: strict,
-            extractionState: extractionState
-          )
-        }
+        appendTranslationIssues(
+          to: &errors,
+          warnings: &warnings,
+          key: key,
+          localizations: localizations,
+          requiredLocales: requiredLocales,
+          sourceLanguage: sourceLanguage,
+          strict: strict,
+          extractionState: extractionState
+        )
         continue
       }
 
@@ -581,7 +584,7 @@ public struct XCStringsCatalog {
             code: "empty_localization",
             key: key,
             locale: locale,
-            message: "Localization exists but contains no stringUnit values."
+            message: "Localization exists but contains no translatable values."
           )
         )
         continue
@@ -601,17 +604,22 @@ public struct XCStringsCatalog {
         }
 
         if unit.state != "translated" {
-          let issue = ValidationIssue(
-            severity: strict || extractionState == "manual" ? .error : .warning,
-            code: "translation_not_translated",
-            key: key,
-            locale: locale,
-            message: "Translation state is \(unit.state)."
-          )
-          if issue.severity == .error {
-            errors.append(issue)
-          } else {
-            warnings.append(issue)
+          // Source language with non-empty value is OK even if state is "new"
+          // (normal for auto-extracted entries like extracted_with_value).
+          let isSourceLangOK = locale == sourceLanguage && !unit.value.isEmpty
+          if !isSourceLangOK {
+            let issue = ValidationIssue(
+              severity: strict || extractionState == "manual" ? .error : .warning,
+              code: "translation_not_translated",
+              key: key,
+              locale: locale,
+              message: "Translation state is \(unit.state)."
+            )
+            if issue.severity == .error {
+              errors.append(issue)
+            } else {
+              warnings.append(issue)
+            }
           }
         }
 
@@ -651,6 +659,11 @@ public struct XCStringsCatalog {
     if units.allSatisfy({ !$0.value.isEmpty && $0.state == "translated" }) {
       return .translated
     }
+    // Source language with non-empty values is considered translated even if
+    // the state is "new" (common for extracted_with_value entries).
+    if locale == sourceLanguage && units.allSatisfy({ !$0.value.isEmpty }) {
+      return .translated
+    }
     return .incomplete
   }
 
@@ -681,6 +694,14 @@ public struct XCStringsCatalog {
         )
       }
 
+      if let stringSet = dictionary["stringSet"] as? JSONObject {
+        let state = stringSet["state"] as? String ?? ""
+        let values = stringSet["values"] as? [String] ?? []
+        for setValue in values {
+          units.append(StringUnit(state: state, value: setValue))
+        }
+      }
+
       for nestedValue in dictionary.values {
         switch nestedValue {
         case is JSONObject, is JSONArray:
@@ -704,6 +725,11 @@ public struct XCStringsCatalog {
       if var stringUnit = dictionary["stringUnit"] as? JSONObject {
         stringUnit["state"] = state
         dictionary["stringUnit"] = stringUnit
+      }
+
+      if var stringSet = dictionary["stringSet"] as? JSONObject {
+        stringSet["state"] = state
+        dictionary["stringSet"] = stringSet
       }
 
       for key in dictionary.keys.sorted() {

@@ -25,11 +25,11 @@ private struct ParsedArguments {
 }
 
 private enum Command {
-  case locales(path: String)
-  case inspect(path: String)
-  case find(path: String, query: FindQuery)
-  case show(path: String, key: String)
-  case validate(path: String, strict: Bool, requiredLocales: [String]?)
+  case locales(paths: [String])
+  case inspect(paths: [String])
+  case find(paths: [String], query: FindQuery)
+  case show(paths: [String], key: String)
+  case validate(paths: [String], strict: Bool, requiredLocales: [String]?)
   case upsert(path: String, key: String, comment: String?, inputSource: InputSource?, dryRun: Bool)
   case remove(path: String, key: String, dryRun: Bool)
   case localeAdd(path: String, locale: String, copyFrom: String?, state: String, dryRun: Bool)
@@ -65,100 +65,234 @@ struct XCStringsUtilCLI {
 
   private static func run(command: Command, outputFormat: OutputFormat) throws -> ExitCode {
     switch command {
-    case let .locales(path):
-      let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: path))
-      let result = catalog.locales()
-      try render(result, format: outputFormat) {
-        """
-        Source language: \(result.sourceLanguage)
-        Locales: \(result.locales.joined(separator: ", "))
-        """
+    case let .locales(paths):
+      if paths.count == 1 {
+        let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: paths[0]))
+        let result = catalog.locales()
+        try render(result, format: outputFormat) {
+          """
+          Source language: \(result.sourceLanguage)
+          Locales: \(result.locales.joined(separator: ", "))
+          """
+        }
+      } else {
+        var allLocales: Set<String> = []
+        var sourceLanguage = "en"
+        for path in paths {
+          let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: path))
+          let result = catalog.locales()
+          sourceLanguage = result.sourceLanguage
+          allLocales.formUnion(result.locales)
+        }
+        let merged = LocalesResult(sourceLanguage: sourceLanguage, locales: allLocales.sorted())
+        try render(merged, format: outputFormat) {
+          """
+          Source language: \(merged.sourceLanguage)
+          Locales: \(merged.locales.joined(separator: ", "))
+          (\(paths.count) files scanned)
+          """
+        }
       }
       return .success
 
-    case let .inspect(path):
-      let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: path))
-      let result = catalog.inspect()
-      try render(result, format: outputFormat) {
-        """
-        Source language: \(result.sourceLanguage)
-        Locales: \(result.locales.joined(separator: ", "))
-        Keys: \(result.keyCount) total (\(result.manualKeyCount) manual / \(result.autoKeyCount) auto)
-        Translatable: \(result.translatableKeyCount)
-        """
+    case let .inspect(paths):
+      if paths.count == 1 {
+        let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: paths[0]))
+        let result = catalog.inspect()
+        try render(result, format: outputFormat) {
+          """
+          Source language: \(result.sourceLanguage)
+          Locales: \(result.locales.joined(separator: ", "))
+          Keys: \(result.keyCount) total (\(result.manualKeyCount) manual / \(result.autoKeyCount) auto)
+          Translatable: \(result.translatableKeyCount)
+          """
+        }
+      } else {
+        struct FileInspect: Codable { var file: String; var inspection: InspectResult }
+        var entries: [FileInspect] = []
+        for path in paths {
+          let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: path))
+          entries.append(FileInspect(file: path, inspection: catalog.inspect()))
+        }
+        try render(entries, format: outputFormat) {
+          entries.map { e in
+            "\(e.file): \(e.inspection.keyCount) keys (\(e.inspection.manualKeyCount) manual / \(e.inspection.autoKeyCount) auto)"
+          }.joined(separator: "\n")
+        }
       }
       return .success
 
-    case let .find(path, query):
-      let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: path))
-      let result = try catalog.find(query)
-      try render(result, format: outputFormat) {
-        result
-          .flatMap { entry in
-            entry.matched.map { match in
-              [
-                entry.key,
-                entry.extractionState,
-                match.field.rawValue,
-                match.locale ?? "-",
-                match.match.rawValue,
-                match.value ?? "-",
-              ].joined(separator: "\t")
+    case let .find(paths, query):
+      if paths.count == 1 {
+        let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: paths[0]))
+        let result = try catalog.find(query)
+        try render(result, format: outputFormat) {
+          result
+            .flatMap { entry in
+              entry.matched.map { match in
+                [
+                  entry.key,
+                  entry.extractionState,
+                  match.field.rawValue,
+                  match.locale ?? "-",
+                  match.match.rawValue,
+                  match.value ?? "-",
+                ].joined(separator: "\t")
+              }
+            }
+            .joined(separator: "\n")
+        }
+      } else {
+        struct FileFind: Codable { var file: String; var results: [FindResultEntry] }
+        var entries: [FileFind] = []
+        for path in paths {
+          let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: path))
+          let result = try catalog.find(query)
+          if !result.isEmpty {
+            entries.append(FileFind(file: path, results: result))
+          }
+        }
+        try render(entries, format: outputFormat) {
+          entries.flatMap { fileEntry in
+            fileEntry.results.flatMap { entry in
+              entry.matched.map { match in
+                [
+                  fileEntry.file,
+                  entry.key,
+                  entry.extractionState,
+                  match.field.rawValue,
+                  match.locale ?? "-",
+                  match.match.rawValue,
+                  match.value ?? "-",
+                ].joined(separator: "\t")
+              }
+            }
+          }.joined(separator: "\n")
+        }
+      }
+      return .success
+
+    case let .show(paths, key):
+      if paths.count == 1 {
+        let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: paths[0]))
+        let result = try catalog.show(key: key)
+        try render(result, format: outputFormat) {
+          var lines = [
+            "key: \(result.key)",
+            "extractionState: \(result.extractionState)",
+            "shouldTranslate: \(result.shouldTranslate)",
+          ]
+          if let comment = result.comment {
+            lines.insert("comment: \(comment)", at: 2)
+          }
+          for locale in result.localizations.keys.sorted() {
+            let values = result.localizations[locale] ?? []
+            if values.isEmpty {
+              lines.append("\(locale): []")
+              continue
+            }
+            for value in values {
+              lines.append("\(locale) [\(value.state)]: \(value.value)")
             }
           }
-          .joined(separator: "\n")
+          return lines.joined(separator: "\n")
+        }
+      } else {
+        struct FileShow: Codable { var file: String; var result: ShowResult }
+        var entries: [FileShow] = []
+        for path in paths {
+          let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: path))
+          guard let result = try? catalog.show(key: key) else { continue }
+          entries.append(FileShow(file: path, result: result))
+        }
+        guard !entries.isEmpty else {
+          throw XCStringsCatalogError.keyNotFound(key)
+        }
+        try render(entries, format: outputFormat) {
+          entries.flatMap { entry in
+            var lines = ["\(entry.file):"]
+            for locale in entry.result.localizations.keys.sorted() {
+              let values = entry.result.localizations[locale] ?? []
+              for value in values {
+                lines.append("  \(locale) [\(value.state)]: \(value.value)")
+              }
+            }
+            return lines
+          }.joined(separator: "\n")
+        }
       }
       return .success
 
-    case let .show(path, key):
-      let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: path))
-      let result = try catalog.show(key: key)
-      try render(result, format: outputFormat) {
-        var lines = [
-          "key: \(result.key)",
-          "extractionState: \(result.extractionState)",
-          "shouldTranslate: \(result.shouldTranslate)",
-        ]
-        if let comment = result.comment {
-          lines.insert("comment: \(comment)", at: 2)
-        }
-        for locale in result.localizations.keys.sorted() {
-          let values = result.localizations[locale] ?? []
-          if values.isEmpty {
-            lines.append("\(locale): []")
-            continue
+    case let .validate(paths, strict, requiredLocales):
+      if paths.count == 1 {
+        let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: paths[0]))
+        let result = catalog.validate(requiredLocales: requiredLocales, strict: strict)
+        try render(result, format: outputFormat) {
+          var lines = [
+            "Source language: \(result.sourceLanguage)",
+            "Required locales: \(result.requiredLocales.joined(separator: ", "))",
+            "Errors: \(result.errors.count)",
+            "Warnings: \(result.warnings.count)",
+          ]
+          if !result.errors.isEmpty {
+            lines.append(contentsOf: result.errors.prefix(10).map { issue in
+              "ERROR [\(issue.code)] \(issue.key ?? "-") \(issue.locale ?? "-"): \(issue.message)"
+            })
           }
-          for value in values {
-            lines.append("\(locale) [\(value.state)]: \(value.value)")
+          if !result.warnings.isEmpty {
+            lines.append(contentsOf: result.warnings.prefix(10).map { issue in
+              "WARN [\(issue.code)] \(issue.key ?? "-") \(issue.locale ?? "-"): \(issue.message)"
+            })
           }
+          return lines.joined(separator: "\n")
         }
-        return lines.joined(separator: "\n")
+        return result.isSuccess ? .success : .validationFailed
       }
-      return .success
 
-    case let .validate(path, strict, requiredLocales):
-      let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: path))
-      let result = catalog.validate(requiredLocales: requiredLocales, strict: strict)
-      try render(result, format: outputFormat) {
-        var lines = [
-          "Source language: \(result.sourceLanguage)",
-          "Required locales: \(result.requiredLocales.joined(separator: ", "))",
-          "Errors: \(result.errors.count)",
-          "Warnings: \(result.warnings.count)",
-        ]
-        if !result.errors.isEmpty {
-          lines.append(contentsOf: result.errors.prefix(10).map { issue in
-            "ERROR [\(issue.code)] \(issue.key ?? "-") \(issue.locale ?? "-"): \(issue.message)"
-          })
-        }
-        if !result.warnings.isEmpty {
-          lines.append(contentsOf: result.warnings.prefix(10).map { issue in
-            "WARN [\(issue.code)] \(issue.key ?? "-") \(issue.locale ?? "-"): \(issue.message)"
-          })
-        }
-        return lines.joined(separator: "\n")
+      // Multi-file validation
+      let resolvedLocales = requiredLocales ?? detectLocalesFromURLs(paths.map { URL(fileURLWithPath: $0) })
+      var totalErrors = 0
+      var totalWarnings = 0
+      var entries: [[String: Any]] = []
+
+      for path in paths {
+        let catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: path))
+        let result = catalog.validate(requiredLocales: resolvedLocales, strict: strict)
+        totalErrors += result.errors.count
+        totalWarnings += result.warnings.count
+        entries.append(["file": path, "errors": result.errors.count, "warnings": result.warnings.count, "result": result])
       }
-      return result.isSuccess ? .success : .validationFailed
+
+      switch outputFormat {
+      case .json:
+        struct BatchEntry: Codable { var file: String; var validation: ValidationResult }
+        let batch = entries.map { BatchEntry(file: $0["file"] as! String, validation: $0["result"] as! ValidationResult) }
+        try render(batch, format: .json) { "" }
+      case .text:
+        let localesLine = resolvedLocales.joined(separator: ", ")
+        var lines = ["Required locales: \(localesLine)"]
+        for entry in entries {
+          let file = entry["file"] as! String
+          let errors = entry["errors"] as! Int
+          let warnings = entry["warnings"] as! Int
+          let result = entry["result"] as! ValidationResult
+          if errors == 0 && warnings == 0 {
+            lines.append("✅ \(file)")
+          } else {
+            lines.append("⚠️  \(file) — \(errors) error(s), \(warnings) warning(s)")
+            for issue in result.errors.prefix(5) {
+              lines.append("  ERROR [\(issue.code)] \(issue.key ?? "-") \(issue.locale ?? "-"): \(issue.message)")
+            }
+            for issue in result.warnings.prefix(5) {
+              lines.append("  WARN [\(issue.code)] \(issue.key ?? "-") \(issue.locale ?? "-"): \(issue.message)")
+            }
+          }
+        }
+        lines.append("\(paths.count) file(s), \(totalErrors) error(s), \(totalWarnings) warning(s)")
+        writeOutput(Data(lines.joined(separator: "\n").utf8))
+        writeOutput(Data([0x0A]))
+      }
+      return totalErrors > 0 ? .validationFailed : .success
 
     case let .upsert(path, key, comment, inputSource, dryRun):
       var catalog = try XCStringsCatalog.load(from: URL(fileURLWithPath: path))
@@ -419,14 +553,14 @@ struct XCStringsUtilCLI {
 
     switch verb {
     case "locales":
-      return .locales(path: try positionalPath(at: 1, parsed: parsed))
+      return .locales(paths: try resolvePathsOrDiscover(at: 1, parsed: parsed))
 
     case "inspect":
-      return .inspect(path: try positionalPath(at: 1, parsed: parsed))
+      return .inspect(paths: try resolvePathsOrDiscover(at: 1, parsed: parsed))
 
     case "find":
       return .find(
-        path: try positionalPath(at: 1, parsed: parsed),
+        paths: try resolvePathsOrDiscover(at: 1, parsed: parsed),
         query: try findQuery(from: parsed)
       )
 
@@ -435,17 +569,20 @@ struct XCStringsUtilCLI {
         throw CLIError("show requires --key.", exitCode: .invalidArguments)
       }
       return .show(
-        path: try positionalPath(at: 1, parsed: parsed),
+        paths: try resolvePathsOrDiscover(at: 1, parsed: parsed),
         key: key
       )
 
     case "validate":
-      let requiredLocales = parsed.value(for: "required-locales")?
+      var requiredLocales = parsed.value(for: "required-locales")?
         .split(separator: ",")
         .map { String($0) }
         .filter { !$0.isEmpty }
+      if requiredLocales == nil, let localesFrom = parsed.value(for: "locales-from") {
+        requiredLocales = try detectLocalesFromPath(localesFrom)
+      }
       return .validate(
-        path: try positionalPath(at: 1, parsed: parsed),
+        paths: try resolvePathsOrDiscover(at: 1, parsed: parsed),
         strict: parsed.hasFlag("strict"),
         requiredLocales: requiredLocales
       )
@@ -513,6 +650,20 @@ struct XCStringsUtilCLI {
     return parsed.positionals[index]
   }
 
+  private static func resolvePathsOrDiscover(at index: Int, parsed: ParsedArguments) throws -> [String] {
+    if parsed.positionals.count > index {
+      return [parsed.positionals[index]]
+    }
+    let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let discovered = findXCStringsFiles(in: cwd)
+    guard !discovered.isEmpty else {
+      throw CLIError("No .xcstrings files found in the current directory.", exitCode: .commandFailed)
+    }
+    return discovered.map { url in
+      url.path.hasPrefix(cwd.path) ? String(url.path.dropFirst(cwd.path.count + 1)) : url.path
+    }
+  }
+
   private static func findQuery(from parsed: ParsedArguments) throws -> FindQuery {
     let selectors = [
       (FindField.key, parsed.value(for: "key")),
@@ -573,16 +724,53 @@ struct XCStringsUtilCLI {
     )
   }
 
+  private static func findXCStringsFiles(in directory: URL) -> [URL] {
+    guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil) else {
+      return []
+    }
+    return enumerator.compactMap { item -> URL? in
+      guard let url = item as? URL, url.pathExtension == "xcstrings" else { return nil }
+      let p = url.path
+      guard !p.contains("/.build/"), !p.contains("/DerivedData/") else { return nil }
+      return url
+    }.sorted { $0.path < $1.path }
+  }
+
+  private static func detectLocalesFromURLs(_ files: [URL]) -> [String] {
+    var locales: Set<String> = []
+    for file in files {
+      guard let catalog = try? XCStringsCatalog.load(from: file) else { continue }
+      locales.formUnion(catalog.validationLocales)
+    }
+    return locales.sorted()
+  }
+
+  private static func detectLocalesFromPath(_ path: String) throws -> [String] {
+    let url = URL(fileURLWithPath: path)
+    var isDir: ObjCBool = false
+
+    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else {
+      throw CLIError("--locales-from path not found: \(path)", exitCode: .invalidArguments)
+    }
+
+    let files = isDir.boolValue ? findXCStringsFiles(in: url) : [url]
+    let locales = detectLocalesFromURLs(files)
+    guard !locales.isEmpty else {
+      throw CLIError("No locales detected from: \(path)", exitCode: .invalidArguments)
+    }
+    return locales
+  }
+
   private static func helpText() -> String {
     """
     xcstrings-util
 
     Usage:
-      xcstrings-util locales <path> [--json]
-      xcstrings-util inspect <path> [--json]
-      xcstrings-util find <path> (--key <key> | --string <text> | --comment <text>) [--locale <locale>] [--match exact|contains|prefix|suffix|regex] [--json]
-      xcstrings-util show <path> --key <key> [--json]
-      xcstrings-util validate <path> [--strict] [--required-locales en,ja] [--json]
+      xcstrings-util locales [<path>] [--json]
+      xcstrings-util inspect [<path>] [--json]
+      xcstrings-util find [<path>] (--key <key> | --string <text> | --comment <text>) [--locale <locale>] [--match exact|contains|prefix|suffix|regex] [--json]
+      xcstrings-util show [<path>] --key <key> [--json]
+      xcstrings-util validate [<path>] [--strict] [--required-locales en,ja] [--locales-from <path|dir>] [--json]
       xcstrings-util upsert <path> --key <key> [--comment <text>] [--input <file>] [--dry-run] [--json]
       xcstrings-util remove <path> --key <key> [--dry-run] [--json]
       xcstrings-util locale add <path> --locale <locale> [--copy-from <locale>] [--state new|needs_review|translated] [--dry-run] [--json]
@@ -593,6 +781,8 @@ struct XCStringsUtilCLI {
       - Mutation commands always rewrite files in Xcode-compatible xcstrings formatting.
       - If --input is omitted for upsert, JSON is read from stdin unless it is a comment-only update.
       - validate exits with status 1 when validation errors are present.
+      - --locales-from detects required locales from another xcstrings file or a directory of xcstrings files.
+      - When path is omitted, read commands and validate scan the current directory for .xcstrings files.
     """
   }
 
